@@ -1,0 +1,2 @@
+{"level":"ERROR","location":"[__symbol_conversion:1352] data_ws","message":{"code":-300,"message":"Please provide a valid symbol","s":"error","type":"sub","invalid_symbols":["NSE:TATAMOTORS-EQ"]},"timestamp":"2026-10-29 14:42:07,516+0530","service":"FyersDataSocket"}
+{"level":"ERROR","location":"[<lambda>:1663] data_ws","message":"Connection to remote host was lost.","timestamp":"2026-10-29 14:56:09,336+0530","service":"FyersDataSocket"}
