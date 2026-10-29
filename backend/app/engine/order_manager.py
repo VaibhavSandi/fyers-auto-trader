@@ -57,12 +57,35 @@ class OrderManager:
     # ---- entries -----------------------------------------------------------
 
     def place_entry(self, *, symbol: str, direction: str, quantity: int, reference_price: float,
-                     stop_loss: float, target: float, signal_id: int | None) -> tuple[Order, Position | None]:
+                     stop_loss: float, target: float, signal_id: int | None,
+                     available_capital: float | None = None,
+                     avg_bar_volume: float | None = None) -> tuple[Order, Position | None]:
         existing_open = self.db.query(Position).filter(
             Position.symbol == symbol, Position.status.in_(["OPEN", "CLOSING"])
         ).first()
         if existing_open:
             raise OrderManagerError(f"Refusing duplicate entry: {symbol} already has an open position")
+
+        # Available-capital check (Phase 7): available_capital, when given by
+        # the caller, already accounts for capital locked in OTHER open
+        # positions - position sizing alone only knows the day's starting
+        # capital, not what's currently committed elsewhere.
+        capital_required = quantity * reference_price
+        if available_capital is not None and capital_required > available_capital:
+            client_order_id = self._new_client_order_id()
+            order = Order(
+                client_order_id=client_order_id, symbol=symbol, side=direction, order_type="MARKET",
+                quantity=quantity, price=reference_price, purpose="ENTRY", status="REJECTED", mode=self.mode,
+                error_message=(f"Insufficient available capital: need Rs.{capital_required:.2f}, "
+                               f"have Rs.{available_capital:.2f} (after capital locked in other open positions)"),
+            )
+            self.db.add(order)
+            self.db.commit()
+            self._audit("ORDER_REJECTED_INSUFFICIENT_CAPITAL", {
+                "symbol": symbol, "capital_required": round(capital_required, 2),
+                "available_capital": round(available_capital, 2),
+            })
+            return order, None
 
         client_order_id = self._new_client_order_id()
         order = Order(
@@ -75,8 +98,11 @@ class OrderManager:
         try:
             if self.mode == "paper":
                 fill = paper_broker.simulate_fill(symbol=symbol, side=direction, quantity=quantity,
-                                                   reference_price=reference_price)
+                                                   reference_price=reference_price, avg_bar_volume=avg_bar_volume)
                 self._apply_fill(order, fill.broker_order_id, fill.status, fill.filled_quantity, fill.average_price)
+                if fill.status == "REJECTED":
+                    order.error_message = fill.message
+                    self.db.commit()
             else:
                 resp = self.fyers_client.place_order(
                     symbol=symbol, qty=quantity, side=SIDE_MAP[direction], order_type=2,
@@ -206,7 +232,11 @@ class OrderManager:
         order.broker_order_id = broker_order_id
         order.filled_quantity = filled_qty
         order.average_price = avg_price
-        order.status = "FILLED" if status == "FILLED" else "REJECTED"
+        # Pass PARTIAL through as PARTIAL - previously this collapsed any
+        # non-"FILLED" paper status (including a legitimate partial fill)
+        # straight to "REJECTED", which was harmless only because the paper
+        # broker never actually returned PARTIAL before this Phase 7 change.
+        order.status = status if status in ("FILLED", "PARTIAL") else "REJECTED"
         self.db.commit()
 
     def _confirm_live_fill(self, order: Order) -> None:

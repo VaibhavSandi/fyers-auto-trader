@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session
 
 from app.database import session_scope
 from app.config import get_settings
-from app.models import UserSettings, Signal, SystemEvent, BrokerConnection, EngineActivity
+from app.models import UserSettings, Signal, SystemEvent, BrokerConnection, EngineActivity, Position
 from app.engine import universe, scanner, market_regime, strategy, position_sizing
 from app.engine.risk_engine import RiskEngine
 from app.engine.order_manager import OrderManager
@@ -233,8 +233,8 @@ class TradingEngine:
             return
         _log_health(db, "STRATEGY", "HEALTHY")
 
-        best_setup, best_signal_row, candidates_summary, universe_size, eligible_count = self._find_best_setup(
-            db, user_settings, regime_result.regime
+        best_setup, best_signal_row, candidates_summary, universe_size, eligible_count, best_avg_bar_volume = (
+            self._find_best_setup(db, user_settings, regime_result.regime)
         )
 
         if best_setup is None:
@@ -249,7 +249,8 @@ class TradingEngine:
             return
 
         action, detail = self._execute_setup(
-            db, user_settings, risk_engine, order_manager, best_setup, best_signal_row, today
+            db, user_settings, risk_engine, order_manager, best_setup, best_signal_row, today,
+            avg_bar_volume=best_avg_bar_volume,
         )
         self._record_activity(
             db, mode=mode, stage="SCAN_RESULT", message=detail, market_regime=regime_result.regime,
@@ -374,16 +375,18 @@ class TradingEngine:
         return batch
 
     def _find_best_setup(self, db: Session, user_settings: UserSettings, regime: str):
-        """Returns (best_setup, best_signal_row, candidates_summary, universe_size, eligible_count).
-        Uses the shared price cache for live price/bid/ask (no REST) and a
-        rotating batch for history refresh (see _next_scan_batch)."""
+        """Returns (best_setup, best_signal_row, candidates_summary, universe_size,
+        eligible_count, best_avg_bar_volume). Uses the shared price cache for
+        live price/bid/ask (no REST) and a rotating batch for history refresh
+        (see _next_scan_batch). best_avg_bar_volume feeds the paper broker's
+        liquidity-aware fill simulation (Phase 7) - None if no setup passed."""
         if self._fyers_client is None or self._live_feed is None:
-            return None, None, [], 0, 0
+            return None, None, [], 0, 0, None
         if self._live_feed.status() != STATUS_CONNECTED:
             # Blocked per the trading-safety rule: never scan for NEW entries
             # on a disconnected or stale feed, even though existing positions
             # may still be monitored with best-effort cached data.
-            return None, None, [], 0, 0
+            return None, None, [], 0, 0, None
 
         symbols = universe.get_universe_symbols()
         refresh_batch = self._next_scan_batch(symbols)
@@ -405,6 +408,7 @@ class TradingEngine:
 
         best_setup = None
         best_signal_row = None
+        best_avg_bar_volume = None
         candidates_summary: list[dict] = []
         for candidate in candidates:
             candles = candle_cache[candidate.symbol]
@@ -432,11 +436,14 @@ class TradingEngine:
             if setup.passed and (best_setup is None or setup.score > best_setup.score):
                 best_setup = setup
                 best_signal_row = signal_row
+                recent = candles[-20:]
+                best_avg_bar_volume = sum(c["volume"] for c in recent) / len(recent) if recent else None
 
-        return best_setup, best_signal_row, candidates_summary, len(symbols), len(eligible)
+        return best_setup, best_signal_row, candidates_summary, len(symbols), len(eligible), best_avg_bar_volume
 
     def _execute_setup(self, db: Session, user_settings: UserSettings, risk_engine: RiskEngine,
-                        order_manager: OrderManager, setup, signal_row: Signal, today: str) -> tuple[str, str]:
+                        order_manager: OrderManager, setup, signal_row: Signal, today: str,
+                        avg_bar_volume: float | None = None) -> tuple[str, str]:
         """Returns (outcome, detail) where outcome is ENTERED | REJECTED | ERROR."""
         setup_check = risk_engine.validate_setup(setup.symbol, setup.risk_reward, user_settings.min_risk_reward)
         if not setup_check.allowed:
@@ -450,8 +457,19 @@ class TradingEngine:
             return "REJECTED", f"Best setup was {setup.symbol} ({setup.direction}, {setup.score}/10) but: {gate.reason}"
 
         day_capital = gate.details["day_start_capital"]
+
+        # Phase 7: available capital must account for what's ALREADY locked
+        # in other open positions, not just the day's starting capital -
+        # otherwise two concurrent positions could each be sized as if the
+        # full day-start capital were available to both.
+        locked_capital = sum(
+            (p.entry_price or 0) * (p.quantity or 0)
+            for p in db.query(Position).filter(Position.status.in_(["OPEN", "CLOSING"])).all()
+        )
+        available_capital = max(0.0, day_capital - locked_capital)
+
         sizing = position_sizing.calculate_position_size(
-            available_capital=day_capital, max_risk_amount=gate.max_risk_amount,
+            available_capital=available_capital, max_risk_amount=gate.max_risk_amount,
             entry_price=setup.entry_price, risk_per_share=setup.risk_per_share,
         )
         if sizing.quantity <= 0:
@@ -473,7 +491,7 @@ class TradingEngine:
             order, position = order_manager.place_entry(
                 symbol=setup.symbol, direction=setup.direction, quantity=sizing.quantity,
                 reference_price=setup.entry_price, stop_loss=setup.stop_loss, target=setup.target,
-                signal_id=signal_row.id,
+                signal_id=signal_row.id, available_capital=available_capital, avg_bar_volume=avg_bar_volume,
             )
         except Exception as exc:
             logger.exception("Failed to place entry for %s", setup.symbol)

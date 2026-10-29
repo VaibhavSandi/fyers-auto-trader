@@ -55,4 +55,32 @@ export const api = {
 
   // diagnostics
   getDiagnostics: () => request<any>("/diagnostics"),
+
+  // historical data (Phase 2)
+  getDataStatus: () => request<any[]>("/data/status"),
+  syncData: (payload: { symbols?: string[]; timeframe?: string; days?: number }) =>
+    request<any>("/data/sync", { method: "POST", body: JSON.stringify(payload) }),
+
+  // backtesting (Phase 3/4/5)
+  getStrategies: () => request<any[]>("/backtest/strategies"),
+  runBacktest: (payload: any) => request<any>("/backtest/run", { method: "POST", body: JSON.stringify(payload) }),
+  listBacktests: () => request<any[]>("/backtest"),
+  getBacktest: (id: number) => request<any>(`/backtest/${id}`),
+  runWalkForward: (payload: any) =>
+    request<any>("/backtest/walk-forward", { method: "POST", body: JSON.stringify(payload) }),
+
+  // ML (Phase 6)
+  trainModel: (strategyName: string) =>
+    request<any>("/ml/train", { method: "POST", body: JSON.stringify({ strategy_name: strategyName }) }),
+  listModels: () => request<any[]>("/ml/models"),
+
+  // self-learning loop (Phase 8)
+  diagnose: (strategyName?: string) =>
+    request<any>(`/learning/diagnose${strategyName ? `?strategy_name=${strategyName}` : ""}`),
+  runExperiment: (payload: any) =>
+    request<any>("/learning/experiment", { method: "POST", body: JSON.stringify(payload) }),
+  listExperiments: () => request<any[]>("/learning/experiments"),
+  listActiveVersions: () => request<any[]>("/learning/active"),
+  rollbackStrategy: (strategyName: string, reason: string) =>
+    request<any>("/learning/rollback", { method: "POST", body: JSON.stringify({ strategy_name: strategyName, reason }) }),
 };

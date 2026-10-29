@@ -143,6 +143,16 @@ table th { color: var(--text-dim); font-weight: 600; }
 .badge-win { color: var(--green); font-weight: 700; }
 .badge-loss { color: var(--red); font-weight: 700; }
 
+.pill {
+  display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700;
+  background: #2a3347; color: var(--text-dim);
+}
+.pill.good { background: #0b2e1a; color: var(--green); }
+.pill.warn { background: #3b2f00; color: var(--yellow); }
+.pill.bad { background: #3a0f12; color: var(--red); }
+
+h4 { font-size: 13px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin: 0 0 8px; }
+
 .muted { color: var(--text-dim); font-size: 13px; }
 .error-box { background: #3a0f12; border: 1px solid var(--red); color: #fecaca; padding: 12px; border-radius: 8px; margin-bottom: 14px; }
 .info-box { background: #0f2340; border: 1px solid var(--blue); color: #bfdbfe; padding: 12px; border-radius: 8px; margin-bottom: 14px; }

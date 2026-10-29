@@ -72,7 +72,7 @@ def test_find_best_setup_refuses_to_scan_when_feed_not_connected():
 
     from app.models import UserSettings
     settings = UserSettings(trading_capital=10000, min_risk_reward=1.5)
-    best_setup, signal_row, candidates, universe_size, eligible_count = tengine._find_best_setup(
+    best_setup, signal_row, candidates, universe_size, eligible_count, avg_bar_volume = tengine._find_best_setup(
         db=None, user_settings=settings, regime="BULLISH"
     )
     assert best_setup is None
