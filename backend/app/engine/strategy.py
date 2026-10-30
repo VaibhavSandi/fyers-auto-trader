@@ -72,7 +72,9 @@ def _score_direction(symbol: str, candles: list[dict], direction: str, market_re
     entry = last["close"]
     ema9 = ind.ema_latest(candles, 9)
     ema21 = ind.ema_latest(candles, 21)
-    vwap = ind.vwap(candles)
+    # VWAP is session-relative (resets each trading day) even when `candles`
+    # itself carries prior-day bars for warm-up - only today's bars count.
+    vwap = ind.vwap(ind.session_slice(candles))
     rsi_val = ind.rsi(candles)
     atr_val = ind.atr(candles)
     rel_vol = ind.relative_volume(candles)

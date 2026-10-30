@@ -32,6 +32,8 @@ export default function ResearchLab() {
   const [wfEmbargoDays, setWfEmbargoDays] = useState(1);
   const [wfResult, setWfResult] = useState<any>(null);
 
+  const [compareResult, setCompareResult] = useState<any>(null);
+
   function refresh() {
     api.getDataStatus().then(setDataStatus).catch(() => {});
     api.getStrategies().then(setStrategies).catch(() => {});
@@ -64,6 +66,23 @@ export default function ResearchLab() {
       });
       setBtResult(result);
       refresh();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCompareWarmup() {
+    setBusy(true);
+    setError(null);
+    setCompareResult(null);
+    try {
+      const result = await api.compareWarmup({
+        symbol: btSymbol, timeframe: "5", start_date: btStart, end_date: btEnd,
+        capital: btCapital, risk_profile: btProfile, strategy_name: btStrategy,
+      });
+      setCompareResult(result);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -167,6 +186,9 @@ export default function ResearchLab() {
 
         <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
           <button className="btn" onClick={handleRunBacktest} disabled={busy}>Run Single Backtest</button>
+          <button className="btn secondary" onClick={handleCompareWarmup} disabled={busy}>
+            Compare: Early Start vs. Old Same-Day-Only Behavior
+          </button>
         </div>
 
         {btResult && (
@@ -178,6 +200,44 @@ export default function ResearchLab() {
             {btResult.warnings.length > 0 && (
               <div className="muted" style={{ marginTop: 6 }}>⚠ {btResult.warnings.join(" | ")}</div>
             )}
+          </div>
+        )}
+
+        {compareResult && (
+          <div className="info-box" style={{ marginTop: 0, marginBottom: 16 }}>
+            <b>{compareResult.verdict}</b>
+            <div className="table-wrap" style={{ marginTop: 10 }}>
+              <table>
+                <thead>
+                  <tr><th>Scenario</th><th>Trades</th><th>Win Rate</th><th>Net P&amp;L</th>
+                    <th>Profit Factor</th><th>Max DD</th><th>Sharpe-like</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Old (same-day-only, ~11:20 start)</td>
+                    <td>{compareResult.old_same_day_only.metrics.total_trades}</td>
+                    <td>{compareResult.old_same_day_only.metrics.win_rate}%</td>
+                    <td className={compareResult.old_same_day_only.metrics.net_pnl >= 0 ? "badge-win" : "badge-loss"}>
+                      Rs.{compareResult.old_same_day_only.metrics.net_pnl}
+                    </td>
+                    <td>{compareResult.old_same_day_only.metrics.profit_factor}</td>
+                    <td>{compareResult.old_same_day_only.metrics.max_drawdown_pct}%</td>
+                    <td>{compareResult.old_same_day_only.metrics.sharpe_like ?? "-"}</td>
+                  </tr>
+                  <tr>
+                    <td>New (warm-started from market open)</td>
+                    <td>{compareResult.new_warm_started.metrics.total_trades}</td>
+                    <td>{compareResult.new_warm_started.metrics.win_rate}%</td>
+                    <td className={compareResult.new_warm_started.metrics.net_pnl >= 0 ? "badge-win" : "badge-loss"}>
+                      Rs.{compareResult.new_warm_started.metrics.net_pnl}
+                    </td>
+                    <td>{compareResult.new_warm_started.metrics.profit_factor}</td>
+                    <td>{compareResult.new_warm_started.metrics.max_drawdown_pct}%</td>
+                    <td>{compareResult.new_warm_started.metrics.sharpe_like ?? "-"}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 

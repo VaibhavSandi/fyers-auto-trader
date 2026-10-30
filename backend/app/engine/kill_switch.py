@@ -47,6 +47,10 @@ def activate_kill_switch(db: Session, fyers_client=None) -> dict:
     db.commit()
     logger.critical("KILL SWITCH ACTIVATED - auto trading disabled")
 
+    from app.notifications.telegram import notify
+    positions_msg = ", ".join(p.symbol for p in open_positions) if open_positions else "none"
+    notify(f"[CRITICAL] Emergency stop activated. Open positions (not auto-closed): {positions_msg}")
+
     return {
         "kill_switch_active": True,
         "auto_trading_enabled": False,

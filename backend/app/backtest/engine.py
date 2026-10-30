@@ -112,7 +112,17 @@ class Backtester:
         self.settings = app_settings
 
     def run(self, *, symbol: str, timeframe: str, start: dt.date, end: dt.date,
-            capital: float, risk_profile: str, strategy_name: str = DEFAULT_STRATEGY) -> BacktestResult:
+            capital: float, risk_profile: str, strategy_name: str = DEFAULT_STRATEGY,
+            warm_start: bool = True) -> BacktestResult:
+        """warm_start=True (default, and the realistic live behavior as of
+        this change): every bar sees the full multi-day candle history up
+        to that point, so EMA/RSI/ATR/regime classification are warm from
+        the first bar of any day after the first. warm_start=False
+        reproduces the PREVIOUS live bug on purpose (for the A/B comparison
+        in /api/backtest/compare-warmup): each new calendar day is
+        truncated back to that day's own bars only, so indicators must
+        re-accumulate ~25 bars from scratch every single day (09:15 + 125min
+        = 11:20 effective start), exactly as the live engine used to."""
         warnings: list[str] = []
         defaults = compute_safe_defaults(capital, risk_profile)
         strategy_module = get_strategy(strategy_name)
@@ -175,6 +185,11 @@ class Backtester:
                 banknifty_ptr += 1
             nifty_window = nifty[:nifty_ptr + 1] if nifty and nifty[0]["timestamp"] <= bar_ts else []
             banknifty_window = banknifty[:banknifty_ptr + 1] if banknifty and banknifty[0]["timestamp"] <= bar_ts else []
+
+            if not warm_start:
+                window = ind.session_slice(window)
+                nifty_window = ind.session_slice(nifty_window)
+                banknifty_window = ind.session_slice(banknifty_window)
 
             past_square_off = bar_time >= square_off_t
 

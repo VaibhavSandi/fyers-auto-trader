@@ -1,6 +1,7 @@
 from app.engine.order_manager import OrderManager
 from app.engine.position_manager import PositionManager
 from app.engine.risk_engine import RiskEngine
+from app.engine.trading_engine import TradingEngine
 from app.models import Position
 
 
@@ -20,6 +21,34 @@ def test_time_based_exit_forces_a_close_regardless_of_price(db_session, user_set
     db_session.refresh(position)
     assert position.status == "CLOSED"
     assert position.exit_reason == "EOD_SQUAREOFF"
+
+
+def test_square_off_still_force_closes_when_no_live_price_is_available(db_session, user_settings, monkeypatch):
+    """Regression test: once past the mandatory square-off deadline, a
+    missing/stale live price (e.g. the market has simply closed and the
+    feed went quiet) must NOT leave the position open forever - it must
+    force-close at the last known price, same fallback force_close_all
+    already uses for kill-switch/manual close."""
+    import app.config as config_module
+    config_module.get_settings.cache_clear()
+    monkeypatch.setenv("SQUARE_OFF_TIME", "00:00")
+    config_module.get_settings.cache_clear()
+
+    db_session.add(Position(symbol="NSE:NOPRICE-EQ", direction="BUY", quantity=10, entry_price=100,
+                             stop_loss=95, original_stop_loss=95, target=110, current_price=103,
+                             status="OPEN", mode="paper"))
+    db_session.commit()
+
+    engine = TradingEngine()
+    engine.run_tick(db_session)  # no price cache entry for NSE:NOPRICE-EQ - simulates a stale/missing tick
+
+    position = db_session.query(Position).filter_by(symbol="NSE:NOPRICE-EQ").first()
+    assert position.status == "CLOSED"
+    assert position.exit_reason == "EOD_SQUAREOFF"
+    assert abs(position.exit_price - 103) < 0.1  # fell back to the last known current_price (minus paper slippage)
+
+    monkeypatch.setenv("SQUARE_OFF_TIME", "23:59")
+    config_module.get_settings.cache_clear()
 
 
 def test_square_off_time_detection(db_session, monkeypatch):

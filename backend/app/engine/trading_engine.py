@@ -62,6 +62,20 @@ CANDLE_CACHE_TTL_SECONDS = 180   # 5-min candles don't meaningfully change insid
 CANDLE_RESOLUTION = "5"
 MAX_CANDIDATES_TO_SCORE = 12
 POSITION_MONITOR_MAX_STALE_SECONDS = 60  # how old a cached tick may be and still be used to protect an open position
+# Previously this module fetched ONLY today's date range, so every rolling
+# indicator (EMA/RSI/ATR/relative volume/momentum) and the market-regime
+# classifier - all of which need >=25 bars - had to wait for 25 FRESH
+# same-day 5-min bars to accumulate (09:15 + 25*5min = 11:20) before doing
+# anything at all, even though yesterday's candles were sitting right there
+# in FYERS' history API for free. Widening the fetch window costs nothing
+# extra (one get_history call either way, just a wider date range) and
+# means every indicator is warm from the first tick after market open.
+# Session-relative calculations (VWAP, day-change%) still correctly reset
+# at the day boundary via indicators.session_slice() - see strategy.py and
+# market_regime.py.
+WARMUP_LOOKBACK_DAYS = 5          # calendar days - comfortably covers a weekend or single holiday
+MAX_CANDLES_PER_SYMBOL = 150      # bound memory/compute per symbol regardless of lookback
+SLOW_SCAN_WARNING_SECONDS = 5.0   # log a warning if the regime+scoring phase of a scan cycle takes longer than this
 
 
 def _today() -> str:
@@ -82,6 +96,7 @@ class TradingEngine:
         self._last_scan_at: float = 0.0
         self._scan_cursor: int = 0
         self._candle_cache: dict[str, tuple[float, list[dict]]] = {}
+        self._last_connectivity_blocked: bool = False
 
     # ---- connection management -----------------------------------------
 
@@ -173,9 +188,20 @@ class TradingEngine:
         for position in position_manager.get_open_positions():
             price = self._get_ltp(position.symbol)
             if price is None:
+                if not past_square_off:
+                    _log_health(db, "LIVE_DATA", "DEGRADED",
+                                f"No recent live price for open position {position.symbol} - monitoring paused for it")
+                    continue
+                # Past the mandatory square-off deadline, "never act on a
+                # stale/missing price" must NOT mean "never close the
+                # position" - the deadline is unconditional (same fallback
+                # force_close_all already uses for kill-switch/manual close).
+                # Most commonly this is simply the market having closed and
+                # the live feed going quiet, not a real data problem.
+                price = position.current_price or position.entry_price
                 _log_health(db, "LIVE_DATA", "DEGRADED",
-                            f"No recent live price for open position {position.symbol} - monitoring paused for it")
-                continue
+                            f"No recent live price for {position.symbol} at square-off time - "
+                            f"force-closing at last known price (Rs.{price})")
             candles = self._get_candles(position.symbol, allow_refresh=False)
             from app.engine import indicators as ind
             atr_value = ind.atr(candles) if candles else None
@@ -215,19 +241,23 @@ class TradingEngine:
         if time.time() - self._last_scan_at < SCAN_INTERVAL_SECONDS:
             return
         self._last_scan_at = time.time()
+        scan_started_at = time.perf_counter()
 
         try:
             regime_result = self._get_market_regime()
         except FyersRateLimitError as exc:
             self._record_activity(db, mode=mode, stage="RATE_LIMITED", message=str(exc), action="NO_TRADE")
             return
+        regime_elapsed = time.perf_counter() - scan_started_at
 
         if regime_result is None or not regime_result.tradeable:
             _log_health(db, "STRATEGY", "HEALTHY", "No trade - market regime unsafe/unclear")
             self._record_activity(
                 db, mode=mode, stage="REGIME_UNSAFE",
-                message=(regime_result.reason if regime_result else "Not enough index data yet") +
-                         " - no trade this cycle",
+                message=self._with_slow_suffix(
+                    (regime_result.reason if regime_result else "Not enough index data yet") +
+                    " - no trade this cycle", regime_elapsed,
+                ),
                 market_regime=regime_result.regime if regime_result else "UNKNOWN", action="NO_TRADE",
             )
             return
@@ -236,13 +266,21 @@ class TradingEngine:
         best_setup, best_signal_row, candidates_summary, universe_size, eligible_count, best_avg_bar_volume = (
             self._find_best_setup(db, user_settings, regime_result.regime)
         )
+        total_elapsed = time.perf_counter() - scan_started_at
+        if total_elapsed > SLOW_SCAN_WARNING_SECONDS:
+            logger.warning(
+                "Slow scan cycle: %.1fs total (%.1fs market-regime, %.1fs scan+score for %d symbols)",
+                total_elapsed, regime_elapsed, total_elapsed - regime_elapsed, universe_size or 0,
+            )
 
         if best_setup is None:
             self._record_activity(
                 db, mode=mode, stage="SCANNED_NO_TRADE",
-                message=(f"Scanned {universe_size} stocks - {eligible_count} passed liquidity/volatility/spread "
-                         f"filters - {len(candidates_summary)} scored - none met the minimum quality bar"
-                         if universe_size else "No live data available to scan"),
+                message=self._with_slow_suffix(
+                    f"Scanned {universe_size} stocks - {eligible_count} passed liquidity/volatility/spread "
+                    f"filters - {len(candidates_summary)} scored - none met the minimum quality bar"
+                    if universe_size else "No live data available to scan", total_elapsed,
+                ),
                 market_regime=regime_result.regime, universe_size=universe_size, eligible_count=eligible_count,
                 candidates=candidates_summary, action="NO_TRADE",
             )
@@ -253,11 +291,21 @@ class TradingEngine:
             avg_bar_volume=best_avg_bar_volume,
         )
         self._record_activity(
-            db, mode=mode, stage="SCAN_RESULT", message=detail, market_regime=regime_result.regime,
+            db, mode=mode, stage="SCAN_RESULT", message=self._with_slow_suffix(detail, total_elapsed),
+            market_regime=regime_result.regime,
             universe_size=universe_size, eligible_count=eligible_count, candidates=candidates_summary,
             action=f"ENTERED_{best_setup.direction}" if action == "ENTERED" else action,
             symbol_acted=best_setup.symbol if action == "ENTERED" else None,
         )
+
+    @staticmethod
+    def _with_slow_suffix(message: str, elapsed_seconds: float) -> str:
+        """Appends a visible timing note only when a cycle was actually slow -
+        keeps the normal-case message unchanged, so this never clutters the
+        Journal's activity feed for the (overwhelming majority of) fast cycles."""
+        if elapsed_seconds > SLOW_SCAN_WARNING_SECONDS:
+            return f"{message} [scan took {elapsed_seconds:.1f}s]"
+        return message
 
     def _record_activity(self, db: Session, *, mode: str, stage: str, message: str,
                           market_regime: str | None = None, universe_size: int | None = None,
@@ -274,9 +322,16 @@ class TradingEngine:
 
     def _refresh_connectivity_health(self, db: Session, mode: str) -> None:
         if self._fyers_client is None:
-            if mode == "live":
-                _log_health(db, "FYERS_API", "DISCONNECTED", "Not connected to FYERS - new trades stopped")
-                _log_health(db, "LIVE_DATA", "DISCONNECTED", "Not connected to FYERS")
+            # Paper mode still needs a live FYERS connection for real market
+            # data (quotes/candles) - only order execution is simulated. A
+            # missing client blocks new trades in BOTH modes, so this must
+            # be logged regardless of mode - previously it was live-only,
+            # which left a stale "CONNECTED" health row on screen in paper
+            # mode even while genuinely disconnected (the only visible
+            # symptom was an unexplained "Not enough index data yet").
+            _log_health(db, "FYERS_API", "DISCONNECTED", "Not connected to FYERS - new trades stopped")
+            _log_health(db, "LIVE_DATA", "DISCONNECTED", "Not connected to FYERS")
+            self._check_connectivity_transition(True, "Not connected to FYERS - new trades stopped")
             return
 
         limiter = get_rate_limiter()
@@ -285,21 +340,36 @@ class TradingEngine:
             msg = f"Backing off {remaining:.0f}s after a FYERS rate-limit response - new trades stopped"
             _log_health(db, "FYERS_API", "RATE_LIMITED", msg)
             _log_health(db, "LIVE_DATA", "RATE_LIMITED", msg)
+            self._check_connectivity_transition(True, msg)
             return
 
         _log_health(db, "FYERS_API", "CONNECTED", "Authenticated (token held for today)")
 
         if self._live_feed is None or not self._live_feed.started:
             _log_health(db, "LIVE_DATA", "DISCONNECTED", "Live price feed not started")
+            self._check_connectivity_transition(True, "Live price feed not started")
             return
 
         status = self._live_feed.status()
         if status == STATUS_CONNECTED:
             _log_health(db, "LIVE_DATA", "CONNECTED", f"{self._live_feed.subscribed_count()} symbols subscribed")
+            self._check_connectivity_transition(False, "FYERS connection and live data feed are healthy again")
         elif status == STATUS_STALE_DATA:
             _log_health(db, "LIVE_DATA", "STALE_DATA", "No ticks received recently - new trades blocked")
+            self._check_connectivity_transition(True, "No live ticks received recently - new trades blocked")
         else:
             _log_health(db, "LIVE_DATA", "DISCONNECTED", "WebSocket disconnected - new trades blocked")
+            self._check_connectivity_transition(True, "WebSocket disconnected - new trades blocked")
+
+    def _check_connectivity_transition(self, blocked: bool, message: str) -> None:
+        """Alerts only on a CHANGE of connectivity state, never every tick -
+        this runs every ~20s and would otherwise spam an alert for as long
+        as a disconnect lasts. A no-op unless Telegram alerting is configured."""
+        if blocked == self._last_connectivity_blocked:
+            return
+        self._last_connectivity_blocked = blocked
+        from app.notifications.telegram import notify
+        notify(f"[{'WARNING' if blocked else 'INFO'}] {message}")
 
     # ---- helpers -----------------------------------------------------------
 
@@ -342,8 +412,11 @@ class TradingEngine:
             return cached[1] if cached else []
 
         try:
-            today = dt.date.today().isoformat()
-            candles = self._fyers_client.get_history(symbol, CANDLE_RESOLUTION, today, today, caller="scanner.history")
+            today = dt.date.today()
+            start = today - dt.timedelta(days=WARMUP_LOOKBACK_DAYS)
+            candles = self._fyers_client.get_history(
+                symbol, CANDLE_RESOLUTION, start.isoformat(), today.isoformat(), caller="scanner.history",
+            )
         except FyersRateLimitError as exc:
             logger.warning("History fetch rate-limited for %s: %s", symbol, exc)
             return cached[1] if cached else []
@@ -351,6 +424,8 @@ class TradingEngine:
             logger.warning("History fetch failed for %s: %s", symbol, exc)
             return cached[1] if cached else []
 
+        if len(candles) > MAX_CANDLES_PER_SYMBOL:
+            candles = candles[-MAX_CANDLES_PER_SYMBOL:]
         self._candle_cache[symbol] = (time.time(), candles)
         return candles
 

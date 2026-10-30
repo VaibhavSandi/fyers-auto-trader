@@ -1,13 +1,17 @@
-from app.engine.trading_engine import TradingEngine, HISTORY_BATCH_SIZE
+import datetime as dt
+
+from app.engine.trading_engine import TradingEngine, HISTORY_BATCH_SIZE, WARMUP_LOOKBACK_DAYS
 from app.fyers.websocket_feed import LiveFeed
 
 
 class FakeFyersClient:
     def __init__(self):
         self.history_calls = []
+        self.history_ranges = []
 
     def get_history(self, symbol, resolution, range_from, range_to, caller="unspecified"):
         self.history_calls.append(symbol)
+        self.history_ranges.append((range_from, range_to))
         return [{"timestamp": i, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000} for i in range(30)]
 
 
@@ -82,3 +86,40 @@ def test_find_best_setup_refuses_to_scan_when_feed_not_connected():
 
 def fake_calls(tengine):
     return getattr(tengine._fyers_client, "history_calls", [])
+
+
+def test_get_candles_fetches_a_warmup_window_not_just_today():
+    """Regression test for the 11:20 AM start-delay bug: the live engine
+    must request several PRIOR calendar days of history too (zero added API
+    cost - one request either way), not just today, so EMA/RSI/ATR/regime
+    classification are warm from market open instead of needing ~25 FRESH
+    same-day bars to accumulate first."""
+    tengine = TradingEngine()
+    fake = FakeFyersClient()
+    tengine._fyers_client = fake
+
+    tengine._get_candles("NSE:A-EQ", allow_refresh=True)
+
+    assert len(fake.history_ranges) == 1
+    range_from, range_to = fake.history_ranges[0]
+    today = dt.date.today()
+    expected_start = today - dt.timedelta(days=WARMUP_LOOKBACK_DAYS)
+    assert range_from == expected_start.isoformat()
+    assert range_to == today.isoformat()
+    assert range_from != range_to  # the old bug requested (today, today)
+
+
+def test_get_candles_trims_to_a_bounded_max_length():
+    from app.engine.trading_engine import MAX_CANDLES_PER_SYMBOL
+
+    class ManyCandlesClient(FakeFyersClient):
+        def get_history(self, symbol, resolution, range_from, range_to, caller="unspecified"):
+            self.history_calls.append(symbol)
+            self.history_ranges.append((range_from, range_to))
+            return [{"timestamp": i, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1000}
+                    for i in range(MAX_CANDLES_PER_SYMBOL + 50)]
+
+    tengine = TradingEngine()
+    tengine._fyers_client = ManyCandlesClient()
+    result = tengine._get_candles("NSE:A-EQ", allow_refresh=True)
+    assert len(result) == MAX_CANDLES_PER_SYMBOL

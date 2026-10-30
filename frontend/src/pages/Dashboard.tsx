@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useDashboardSocket } from "../useDashboardSocket";
 import EmergencyStop from "../components/EmergencyStop";
+import MarketSession from "../components/MarketSession";
 import CurrentTrade from "../components/CurrentTrade";
 import TodaySummary from "../components/TodaySummary";
 import SystemHealth from "../components/SystemHealth";
@@ -123,6 +124,8 @@ export default function Dashboard() {
           {dashboard.auto_trading_active ? "Pause Auto Trading" : "Resume Auto Trading"}
         </button>
       </div>
+
+      <MarketSession dashboard={dashboard} />
 
       <EmergencyStop killSwitchActive={dashboard.kill_switch_active} onChanged={refresh} />
 

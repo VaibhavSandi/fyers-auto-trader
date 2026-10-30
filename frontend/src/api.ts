@@ -68,6 +68,8 @@ export const api = {
   getBacktest: (id: number) => request<any>(`/backtest/${id}`),
   runWalkForward: (payload: any) =>
     request<any>("/backtest/walk-forward", { method: "POST", body: JSON.stringify(payload) }),
+  compareWarmup: (payload: any) =>
+    request<any>("/backtest/compare-warmup", { method: "POST", body: JSON.stringify(payload) }),
 
   // ML (Phase 6)
   trainModel: (strategyName: string) =>

@@ -80,6 +80,65 @@ def walk_forward(payload: WalkForwardRequest, db: Session = Depends(get_db)):
     }
 
 
+class WarmupCompareRequest(BaseModel):
+    symbol: str
+    timeframe: str = "5"
+    start_date: str
+    end_date: str
+    capital: float = 10000.0
+    risk_profile: str = "conservative"
+    strategy_name: str = DEFAULT_STRATEGY
+
+
+@router.post("/compare-warmup")
+def compare_warmup(payload: WarmupCompareRequest, db: Session = Depends(get_db)):
+    """Answers: 'if the live engine had warm-started with prior-day candles
+    instead of re-accumulating ~25 same-day bars every morning, would
+    performance actually improve?' Runs the SAME strategy/symbol/range
+    twice - once with the old same-day-only behavior (warm_start=False,
+    effectively an 11:20-ish daily start), once with full multi-day context
+    (warm_start=True, today's real live behavior) - and returns both
+    metric sets side by side. Does not assume either is better; the
+    comparison data is the answer, not an opinion baked into this endpoint."""
+    try:
+        start = dt.date.fromisoformat(payload.start_date)
+        end = dt.date.fromisoformat(payload.end_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start_date/end_date must be YYYY-MM-DD")
+    if start > end:
+        raise HTTPException(status_code=400, detail="start_date must be before end_date")
+
+    data_service = HistoricalDataService(db, trading_engine._fyers_client)
+    backtester = Backtester(data_service, get_settings())
+
+    run_kwargs = dict(symbol=payload.symbol, timeframe=payload.timeframe, start=start, end=end,
+                       capital=payload.capital, risk_profile=payload.risk_profile,
+                       strategy_name=payload.strategy_name)
+
+    old_behavior = backtester.run(**run_kwargs, warm_start=False)
+    new_behavior = backtester.run(**run_kwargs, warm_start=True)
+
+    old_m, new_m = old_behavior.metrics, new_behavior.metrics
+    if old_m["total_trades"] == 0 and new_m["total_trades"] == 0:
+        verdict = "Neither scenario produced any trades in this range - sync more history or widen the date range."
+    elif new_m["net_pnl"] > old_m["net_pnl"]:
+        verdict = (f"Early warm-start outperformed the old same-day-only behavior: "
+                   f"Rs.{new_m['net_pnl']} vs Rs.{old_m['net_pnl']} net P&L over this range.")
+    elif new_m["net_pnl"] < old_m["net_pnl"]:
+        verdict = (f"Early warm-start actually underperformed the old same-day-only behavior here: "
+                   f"Rs.{new_m['net_pnl']} vs Rs.{old_m['net_pnl']} net P&L. More trades is not automatically "
+                   f"better - the extra early-session trades this range took were, on net, worse.")
+    else:
+        verdict = "Both scenarios produced identical net P&L over this range."
+
+    return {
+        "symbol": payload.symbol, "strategy_name": payload.strategy_name,
+        "old_same_day_only": {"metrics": old_m, "warnings": old_behavior.warnings},
+        "new_warm_started": {"metrics": new_m, "warnings": new_behavior.warnings},
+        "verdict": verdict,
+    }
+
+
 @router.post("/run")
 def run_backtest(payload: BacktestRequest, db: Session = Depends(get_db)):
     try:

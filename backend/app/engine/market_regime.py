@@ -60,8 +60,12 @@ def classify_market_regime(nifty_candles: list[dict], banknifty_candles: list[di
             reason="Not enough index data yet to classify the market safely.",
         )
 
-    nifty_change = _day_change_pct(nifty_candles)
-    bn_change = _day_change_pct(banknifty_candles)
+    # Day-change% is session-relative (today's open -> latest close) even
+    # when the caller passes a multi-day window for warm-up purposes - only
+    # today's bars count. The len() check above deliberately stays against
+    # the FULL window (EMA/ATR below legitimately want cross-day context).
+    nifty_change = _day_change_pct(ind.session_slice(nifty_candles))
+    bn_change = _day_change_pct(ind.session_slice(banknifty_candles))
     nifty_vol = ind.average_true_range_pct(nifty_candles)
     bn_vol = ind.average_true_range_pct(banknifty_candles)
     volatility_pct = max([v for v in (nifty_vol, bn_vol) if v is not None], default=None)

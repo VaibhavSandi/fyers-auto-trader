@@ -48,6 +48,13 @@ def _parse_time(value: str) -> dt.time:
 def log_risk_event(db: Session, event_type: str, message: str, severity: str = "INFO", details: dict | None = None) -> None:
     db.add(RiskEvent(event_type=event_type, severity=severity, message=message, details=details or {}))
     db.commit()
+    # Alert on anything that actually stops new trades for the day - a
+    # daily-loss/drawdown breach or a consecutive-loss pause is exactly the
+    # kind of thing you'd otherwise only learn about by having the
+    # dashboard open. A no-op unless Telegram alerting is configured.
+    if severity == "CRITICAL" or event_type == "CONSECUTIVE_LOSSES":
+        from app.notifications.telegram import notify
+        notify(f"[{severity}] {event_type}: {message}")
 
 
 class RiskEngine:

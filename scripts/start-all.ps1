@@ -5,7 +5,7 @@ $ScriptDir = $PSScriptRoot
 
 Write-Host "Starting FYERS Auto Trader..." -ForegroundColor Cyan
 
-Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "start-backend.ps1")
+Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "start-backend-watchdog.ps1")
 Start-Sleep -Seconds 3
 Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "start-frontend.ps1")
 

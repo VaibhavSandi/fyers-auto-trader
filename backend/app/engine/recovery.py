@@ -44,6 +44,11 @@ def force_safe_state_on_startup(db: Session) -> None:
                         message="Application (re)started - RECOVERY CHECK REQUIRED before auto trading can resume"))
     db.commit()
 
+    from app.notifications.telegram import notify
+    open_count = db.query(Position).filter(Position.status.in_(["OPEN", "CLOSING"])).count()
+    notify("Backend (re)started - auto trading is OFF and a recovery check is required before it can resume."
+           + (f" {open_count} position(s) were open at the time." if open_count else ""))
+
 
 def run_recovery_check(db: Session, mode: str, fyers_client=None) -> dict:
     checks: dict[str, dict] = {}
@@ -95,6 +100,28 @@ def run_recovery_check(db: Session, mode: str, fyers_client=None) -> dict:
     }
     if missing_protection:
         overall_ok = False
+
+    if mode == "live":
+        # The software-managed stop above is necessary but not sufficient -
+        # it only protects a position while this process is running. A
+        # missing broker-side backstop (order_manager.py's protective SL-M
+        # order) means a crash/outage between now and the next restart
+        # leaves the position genuinely unprotected, not just unmonitored.
+        missing_broker_stop = [p.symbol for p in open_positions if not p.protective_stop_order_id]
+        checks["broker_protective_stop"] = {
+            "ok": len(missing_broker_stop) == 0,
+            "message": "All open live positions have a broker-side backstop stop order" if not missing_broker_stop
+                        else f"No broker-side backstop order on: {missing_broker_stop} - software-managed stop "
+                             f"still applies, but these are unprotected if the backend goes down",
+        }
+        # Deliberately a WARNING, not a hard recovery-blocking failure: the
+        # position IS still protected by the software-managed stop while
+        # this process runs. Blocking Start entirely here would strand an
+        # otherwise-fine open position with no way to resume monitoring it.
+        if missing_broker_stop:
+            db.add(RiskEvent(event_type="MISSING_BROKER_STOP", severity="WARNING",
+                              message=f"Open live position(s) without a broker-side backstop: {missing_broker_stop}",
+                              details={"symbols": missing_broker_stop}))
 
     user_settings = db.query(UserSettings).first()
     settings_sane = bool(user_settings and user_settings.trading_capital > 0 and user_settings.max_daily_loss_pct > 0)

@@ -33,6 +33,19 @@ def _market_status() -> str:
     return "OPEN" if open_t <= now <= close_t else "CLOSED"
 
 
+def _opening_protection_active() -> bool:
+    """True from market open until ENTRY_START_TIME - the configurable
+    "opening protection" window (no new entries while the first few minutes
+    are typically too volatile/noisy to trust). See risk_engine.py's
+    within_entry_window() for the same check applied as an actual trading
+    gate; this is just its display-only mirror for the dashboard."""
+    app_settings = get_app_settings()
+    now = dt.datetime.now().time()
+    open_t = dt.datetime.strptime(app_settings.MARKET_OPEN_TIME, "%H:%M").time()
+    entry_start_t = dt.datetime.strptime(app_settings.ENTRY_START_TIME, "%H:%M").time()
+    return open_t <= now < entry_start_t
+
+
 @router.get("")
 def get_dashboard(db: Session = Depends(get_db)):
     settings = db.query(UserSettings).first()
@@ -117,6 +130,8 @@ def get_dashboard(db: Session = Depends(get_db)):
         "available_capital": summary["available_capital"],
         "todays_pnl": summary["net_pnl"],
         "market_status": _market_status(),
+        "opening_protection_active": _opening_protection_active(),
+        "ml_status": "advisory_only",  # the trained ML model is never read by live/paper trading decisions
         "trading_mode": settings.trading_mode,
         "auto_trading_active": settings.auto_trading_enabled,
         "kill_switch_active": settings.kill_switch_active,

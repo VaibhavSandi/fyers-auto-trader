@@ -35,6 +35,11 @@ export default function LearningCenter() {
   const [end, setEnd] = useState(today());
   const [experimentResult, setExperimentResult] = useState<any>(null);
 
+  const [mlVersionLabel, setMlVersionLabel] = useState("trade_outcome_v1");
+  const [mlBusy, setMlBusy] = useState(false);
+  const [mlResult, setMlResult] = useState<any>(null);
+  const [mlError, setMlError] = useState<string | null>(null);
+
   function refresh() {
     api.listActiveVersions().then(setActive).catch(() => {});
     api.listModels().then(setModels).catch(() => {});
@@ -67,6 +72,21 @@ export default function LearningCenter() {
       setDiagnosis(await api.diagnose(strategyName));
     } catch (e: any) {
       setError(e.message);
+    }
+  }
+
+  async function handleTrainModel() {
+    setMlBusy(true);
+    setMlError(null);
+    setMlResult(null);
+    try {
+      const result = await api.trainModel(mlVersionLabel);
+      setMlResult(result);
+      refresh();
+    } catch (e: any) {
+      setMlError(e.message);
+    } finally {
+      setMlBusy(false);
     }
   }
 
@@ -155,10 +175,41 @@ export default function LearningCenter() {
       </div>
 
       <div className="card">
+        <h3>ML Trade-Outcome Model (Advisory Only)</h3>
+        <p className="muted">
+          Trains a classifier that predicts P(win) for a setup, using real completed backtest trades
+          (never synthetic data). <b>Nothing in live or paper trading reads this model's output</b> - it
+          exists purely for research/inspection. Needs at least 30 usable backtest trades across your
+          runs in the Research Lab tab before it can train at all.
+        </p>
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label>Version label</label>
+            <input type="text" value={mlVersionLabel} onChange={(e) => setMlVersionLabel(e.target.value)} />
+          </div>
+          <button className="btn" onClick={handleTrainModel} disabled={mlBusy}>
+            {mlBusy ? "Training..." : "Train Model"}
+          </button>
+        </div>
+        {mlError && <div className="error-box" style={{ marginTop: 14 }}>{mlError}</div>}
+        {mlResult && (
+          <div className="info-box" style={{ marginTop: 14 }}>
+            <b>Trained on {mlResult.training_data_summary.sample_size} examples.</b>{" "}
+            Accuracy {mlResult.training_data_summary.accuracy}
+            {mlResult.training_data_summary.roc_auc != null && <> · ROC-AUC {mlResult.training_data_summary.roc_auc}</>}
+            {mlResult.training_data_summary.brier_score != null && <> · Brier {mlResult.training_data_summary.brier_score}</>}
+            {mlResult.training_data_summary.warning && (
+              <div className="muted" style={{ marginTop: 6 }}>⚠ {mlResult.training_data_summary.warning}</div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="card">
         <h3>All Model / Strategy Versions</h3>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Strategy</th><th>Version</th><th>Kind</th><th>Status</th><th>Created</th></tr></thead>
+            <thead><tr><th>Strategy</th><th>Version</th><th>Kind</th><th>Status</th><th>Metrics</th><th>Created</th></tr></thead>
             <tbody>
               {models.map((m) => (
                 <tr key={m.id}>
@@ -166,10 +217,16 @@ export default function LearningCenter() {
                   <td>{m.version_label}</td>
                   <td>{m.kind}</td>
                   <td><span className={STATUS_CLASS[m.status] ?? "pill"}>{m.status}</span></td>
+                  <td className="muted" style={{ fontSize: 12 }}>
+                    {m.kind === "ml_classifier" && m.training_data_summary
+                      ? `n=${m.training_data_summary.sample_size}, acc=${m.training_data_summary.accuracy}` +
+                        (m.training_data_summary.roc_auc != null ? `, AUC=${m.training_data_summary.roc_auc}` : "")
+                      : "-"}
+                  </td>
                   <td className="muted">{new Date(m.created_at + "Z").toLocaleString()}</td>
                 </tr>
               ))}
-              {models.length === 0 && <tr><td colSpan={5} className="muted">No model versions yet - train or run an experiment.</td></tr>}
+              {models.length === 0 && <tr><td colSpan={6} className="muted">No model versions yet - train or run an experiment.</td></tr>}
             </tbody>
           </table>
         </div>

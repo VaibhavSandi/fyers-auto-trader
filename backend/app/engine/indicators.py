@@ -9,7 +9,10 @@ or a list aligned 1:1 with the input.
 """
 from __future__ import annotations
 
+import datetime as dt
 import math
+
+IST_OFFSET = dt.timedelta(hours=5, minutes=30)
 
 
 def closes(candles: list[dict]) -> list[float]:
@@ -114,3 +117,27 @@ def average_true_range_pct(candles: list[dict], period: int = 14) -> float | Non
 
 def is_finite(*values) -> bool:
     return all(v is not None and not math.isnan(v) for v in values if isinstance(v, float))
+
+
+def _ist_date(candle: dict) -> dt.date:
+    ts = candle["timestamp"]
+    as_dt = ts if isinstance(ts, dt.datetime) else dt.datetime.utcfromtimestamp(ts)
+    return (as_dt + IST_OFFSET).date()
+
+
+def session_slice(candles: list[dict]) -> list[dict]:
+    """Given a candle list that may span multiple days (e.g. a live/backtest
+    warm-up window carrying prior-day bars so EMA/RSI/ATR have enough
+    history right at market open), return only the bars belonging to the
+    MOST RECENT IST calendar day present - i.e. the current trading
+    session. Use this before any session-relative calculation (VWAP,
+    day-change%) that must reset at each day's open; rolling multi-bar
+    indicators (EMA/RSI/ATR/relative volume/momentum) should keep using the
+    full, unsliced list - they legitimately benefit from cross-day context."""
+    if not candles:
+        return []
+    last_date = _ist_date(candles[-1])
+    start = len(candles) - 1
+    while start > 0 and _ist_date(candles[start - 1]) == last_date:
+        start -= 1
+    return candles[start:]

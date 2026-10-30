@@ -22,8 +22,18 @@ from app.backtest.walkforward import run_walk_forward
 from app.engine.trading_engine import engine as trading_engine
 from app.learning.diagnostics import diagnose_trades
 from app.learning.promotion import register_model_version, get_active_version, compare_and_decide, rollback
+from app.learning.scheduler import scheduler as auto_learning_scheduler
 
 router = APIRouter(prefix="/api/learning", tags=["learning"])
+
+
+@router.get("/auto-status")
+def auto_status():
+    """Whether the automatic nightly backtest/train/compare pipeline is
+    enabled, and when it last attempted to run - see app/learning/scheduler.py.
+    This never reflects live/paper trading behavior, since a promoted
+    version is never wired into either automatically."""
+    return auto_learning_scheduler.status()
 
 
 @router.get("/diagnose")

@@ -143,12 +143,101 @@ class OrderManager:
             "symbol": symbol, "direction": direction, "quantity": order.filled_quantity,
             "price": order.average_price, "stop_loss": stop_loss, "target": target,
         })
+
+        if self.mode == "live":
+            self._place_protective_stop(position)
+
         return order, position
+
+    # ---- live-mode broker-side protective stop --------------------------------
+
+    def _place_protective_stop(self, position: Position) -> None:
+        """Places a real SL-M order at the broker as a backstop to the
+        software-managed stop-loss monitored every engine tick. This is a
+        backstop, not a replacement: if the broker rejects/can't place it,
+        the entry still stands and the software-managed stop still applies -
+        it is only weaker without this (no protection survives a backend
+        crash/outage until recovery). Failure here is logged, never raised,
+        so a flaky stop placement never unwinds an already-filled entry."""
+        stop_side = SIDE_MAP["SELL" if position.direction == "BUY" else "BUY"]
+        try:
+            resp = self.fyers_client.place_order(
+                symbol=position.symbol, qty=position.quantity, side=stop_side, order_type=3,
+                product_type="INTRADAY", stop_price=position.stop_loss,
+            )
+            position.protective_stop_order_id = str(resp.get("id", ""))
+            self.db.commit()
+            self._audit("PROTECTIVE_STOP_PLACED", {
+                "symbol": position.symbol, "stop_price": position.stop_loss,
+                "broker_order_id": position.protective_stop_order_id,
+            })
+        except Exception as exc:
+            logger.error("Failed to place protective stop for %s: %s - relying on software-managed stop only",
+                          position.symbol, exc)
+            self._audit("PROTECTIVE_STOP_FAILED", {"symbol": position.symbol, "error": str(exc)})
+
+    def _resolve_protective_stop_before_exit(self, position: Position, exit_side: str, reason: str) -> Order | None:
+        """Cancels the resting broker-side stop before a software-triggered
+        exit (target/trailing/time/manual/stop-loss-by-tick) is placed -
+        prevents a stale SL-M order surviving the exit and firing later
+        against a position that no longer exists.
+
+        Returns an Order if the stop had ALREADY filled at the broker before
+        the cancel reached it - the caller must use THIS as the exit and
+        must not place a second, duplicate one. Returns None for the normal
+        case (cleanly cancelled, or ambiguous/not found - logged either way)
+        so the caller places the exit exactly as it always has."""
+        stop_order_id = position.protective_stop_order_id
+        try:
+            self.fyers_client.cancel_order(stop_order_id)
+            position.protective_stop_order_id = None
+            self.db.commit()
+            return None
+        except Exception as exc:
+            logger.warning("Could not cancel protective stop %s for %s (checking if it already filled): %s",
+                            stop_order_id, position.symbol, exc)
+
+        try:
+            book = self.fyers_client.get_orderbook()
+        except Exception:
+            book = []
+        match = next((o for o in book if str(o.get("id")) == stop_order_id), None)
+        position.protective_stop_order_id = None
+        self.db.commit()
+
+        if match is not None and match.get("status") == 2:
+            filled_qty = int(match.get("filledQty", position.quantity))
+            fill_price = float(match.get("tradedPrice", position.current_price or position.entry_price))
+            order = Order(
+                client_order_id=self._new_client_order_id(), symbol=position.symbol, side=exit_side,
+                order_type="SL-M", quantity=position.quantity, price=fill_price, purpose="STOP_LOSS",
+                status="FILLED", mode=self.mode, position_id=position.id, broker_order_id=stop_order_id,
+                filled_quantity=filled_qty, average_price=fill_price, raw_response=match,
+            )
+            self.db.add(order)
+            self.db.commit()
+            self._close_position(position, order, "STOP_LOSS")
+            self._audit("PROTECTIVE_STOP_ALREADY_FILLED", {
+                "symbol": position.symbol, "broker_order_id": stop_order_id, "software_exit_reason": reason,
+            })
+            return order
+
+        self._audit("PROTECTIVE_STOP_CANCEL_AMBIGUOUS", {
+            "symbol": position.symbol, "broker_order_id": stop_order_id,
+            "message": "Could not confirm cancellation or fill status - proceeding with software-triggered exit anyway",
+        })
+        return None
 
     # ---- exits ---------------------------------------------------------------
 
     def place_exit(self, *, position: Position, reference_price: float, reason: str) -> Order:
         exit_side = "SELL" if position.direction == "BUY" else "BUY"
+
+        if self.mode == "live" and position.protective_stop_order_id:
+            already_closed_order = self._resolve_protective_stop_before_exit(position, exit_side, reason)
+            if already_closed_order is not None:
+                return already_closed_order
+
         client_order_id = self._new_client_order_id()
         order = Order(
             client_order_id=client_order_id, symbol=position.symbol, side=exit_side, order_type="MARKET",

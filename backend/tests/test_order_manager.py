@@ -8,11 +8,12 @@ class FakeFyersClient:
     """Minimal stand-in for FyersClient used to drive order-manager behaviour
     deterministically in tests, without any network access."""
 
-    def __init__(self, orderbook_sequence):
+    def __init__(self, orderbook_sequence, fail_cancel_ids: set | None = None):
         self._next_id = 1
         self._orderbook_sequence = list(orderbook_sequence)  # list of orderbook snapshots to return in sequence
         self.placed_orders = []
         self.cancelled = []
+        self._fail_cancel_ids = fail_cancel_ids or set()
 
     def place_order(self, **kwargs):
         order_id = str(self._next_id)
@@ -26,6 +27,8 @@ class FakeFyersClient:
         return []
 
     def cancel_order(self, order_id):
+        if order_id in self._fail_cancel_ids:
+            raise RuntimeError(f"cannot cancel {order_id}: already triggered")
         self.cancelled.append(order_id)
         return {"s": "ok"}
 
@@ -159,3 +162,85 @@ def test_available_capital_check_never_blocks_when_not_provided(db_session):
         stop_loss=95, target=115, signal_id=None,
     )
     assert order.status == "FILLED"
+
+
+# ---- live-mode broker-side protective stop ---------------------------------
+
+def test_live_entry_places_a_broker_side_protective_stop(db_session):
+    fake = FakeFyersClient(orderbook_sequence=[
+        [{"id": "1", "status": 2, "filledQty": 10, "tradedPrice": 100.0}],  # entry fill confirmation
+    ])
+    om = OrderManager(db_session, mode="live", fyers_client=fake)
+    order, position = om.place_entry(symbol="NSE:PROT-EQ", direction="BUY", quantity=10,
+                                      reference_price=100, stop_loss=95, target=115, signal_id=None)
+    assert position is not None
+    assert position.protective_stop_order_id == "2"  # order 1 = entry, order 2 = the stop
+    stop_call = fake.placed_orders[1]
+    assert stop_call["order_type"] == 3  # SL-M
+    assert stop_call["side"] == -1  # opposite of BUY
+    assert stop_call["stop_price"] == 95
+
+
+def test_live_entry_still_succeeds_if_protective_stop_placement_fails(db_session, monkeypatch):
+    fake = FakeFyersClient(orderbook_sequence=[
+        [{"id": "1", "status": 2, "filledQty": 10, "tradedPrice": 100.0}],
+    ])
+    real_place_order = fake.place_order
+    calls = {"n": 0}
+
+    def flaky_place_order(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the protective-stop placement
+            raise RuntimeError("broker rejected stop order")
+        return real_place_order(**kwargs)
+
+    monkeypatch.setattr(fake, "place_order", flaky_place_order)
+    om = OrderManager(db_session, mode="live", fyers_client=fake)
+    order, position = om.place_entry(symbol="NSE:PROTFAIL-EQ", direction="BUY", quantity=10,
+                                      reference_price=100, stop_loss=95, target=115, signal_id=None)
+    assert position is not None  # the entry itself must not be rolled back
+    assert position.protective_stop_order_id is None
+
+
+def test_live_exit_cancels_the_protective_stop_before_placing_the_real_exit(db_session):
+    fake = FakeFyersClient(orderbook_sequence=[
+        [{"id": "1", "status": 2, "filledQty": 10, "tradedPrice": 100.0}],  # entry
+        [{"id": "3", "status": 2, "filledQty": 10, "tradedPrice": 110.0}],  # exit
+    ])
+    om = OrderManager(db_session, mode="live", fyers_client=fake)
+    _, position = om.place_entry(symbol="NSE:EXIT-EQ", direction="BUY", quantity=10,
+                                  reference_price=100, stop_loss=95, target=115, signal_id=None)
+    stop_order_id = position.protective_stop_order_id
+    assert stop_order_id is not None
+
+    exit_order = om.place_exit(position=position, reference_price=110, reason="TARGET")
+    assert stop_order_id in fake.cancelled
+    assert exit_order.status == "FILLED"
+    assert position.status == "CLOSED"
+    assert position.protective_stop_order_id is None
+
+
+def test_live_exit_does_not_double_exit_when_protective_stop_already_filled(db_session):
+    fake = FakeFyersClient(
+        orderbook_sequence=[
+            [{"id": "1", "status": 2, "filledQty": 10, "tradedPrice": 100.0}],  # entry fill
+            [{"id": "2", "status": 2, "filledQty": 10, "tradedPrice": 94.0}],   # stop already filled at broker
+        ],
+        fail_cancel_ids={"2"},
+    )
+    om = OrderManager(db_session, mode="live", fyers_client=fake)
+    _, position = om.place_entry(symbol="NSE:RACE-EQ", direction="BUY", quantity=10,
+                                  reference_price=100, stop_loss=95, target=115, signal_id=None)
+    assert position.protective_stop_order_id == "2"
+
+    # Software-managed monitoring independently decides to exit (e.g. target
+    # logic) right as the broker-side stop has already triggered.
+    exit_order = om.place_exit(position=position, reference_price=115, reason="TARGET")
+
+    assert exit_order.broker_order_id == "2"
+    assert exit_order.average_price == 94.0
+    assert position.status == "CLOSED"
+    assert position.exit_reason == "STOP_LOSS"  # what actually happened at the broker, not the software's guess
+    # Only 2 orders were ever placed at the broker (entry + stop) - no
+    # duplicate exit order was sent for a position the broker already closed.
+    assert len(fake.placed_orders) == 2

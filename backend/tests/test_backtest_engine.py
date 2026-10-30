@@ -189,6 +189,45 @@ def test_metrics_on_empty_trade_list_does_not_crash():
     assert metrics["sharpe_like"] is None
 
 
+def test_warm_start_lets_a_strategy_trade_on_day_two_before_25_same_day_bars_exist(db_session):
+    """Regression test for the exact live bug this change fixes: with
+    warm_start=False (the old same-day-only behavior), day 2 of a backtest
+    must behave exactly like the old live engine did - unable to trade
+    until 25 bars of THAT day alone exist. With warm_start=True (the new
+    default/live behavior), day 2 inherits day 1's bars and can trade
+    immediately if a valid setup appears."""
+    day1 = dt.date.today() - dt.timedelta(days=1)
+    day2 = dt.date.today()
+
+    # Day 1: flat/no-trend - never produces a signal either way, exists only
+    # to supply warm-up history for day 2.
+    flat = _candles_series(day1, 30, 1000, 0.01, direction=1)
+    # Day 2: a strong uptrend starting right at today's open - only 20 bars,
+    # so the same-day-only slice NEVER reaches the 25-bar minimum all day.
+    trending = _candles_series(day2, 20, flat[-1]["close"], 0.3, direction=1)
+
+    stock = flat + trending
+    nifty_day1 = _candles_series(day1, 30, 24000, 0.01, direction=1)
+    banknifty_day1 = _candles_series(day1, 30, 51000, 0.01, direction=1)
+    nifty = nifty_day1 + _candles_series(day2, 20, nifty_day1[-1]["close"], 0.3, direction=1)
+    banknifty = banknifty_day1 + _candles_series(day2, 20, banknifty_day1[-1]["close"], 0.3, direction=1)
+
+    _store_candles(db_session, "NSE:TEST-EQ", "5", stock)
+    _store_candles(db_session, "NSE:NIFTY50-INDEX", "5", nifty)
+    _store_candles(db_session, "NSE:NIFTYBANK-INDEX", "5", banknifty)
+
+    service = HistoricalDataService(db_session, fyers_client=None)
+    bt = Backtester(service, get_settings())
+
+    old_behavior = bt.run(symbol="NSE:TEST-EQ", timeframe="5", start=day1, end=day2,
+                           capital=10000, risk_profile="aggressive", warm_start=False)
+    new_behavior = bt.run(symbol="NSE:TEST-EQ", timeframe="5", start=day1, end=day2,
+                           capital=10000, risk_profile="aggressive", warm_start=True)
+
+    assert len(old_behavior.trades) == 0  # day 1 is flat, day 2 never reaches 25 same-day bars
+    assert len(new_behavior.trades) >= 1  # day 2 inherits day 1's bars - can trade immediately
+
+
 def test_open_trade_at_data_end_is_force_closed_with_a_warning(db_session):
     today = dt.date.today()
     # a trend that only gets going near the very end of the data, so by the

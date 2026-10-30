@@ -176,6 +176,11 @@ class Position(Base):
     status = Column(String, default="OPEN")  # OPEN|CLOSED|CLOSING
     mode = Column(String, default="paper")
     signal_id = Column(Integer, ForeignKey("signals.id"), nullable=True)
+    # Live mode only: broker_order_id of a resting SL-M order placed as a
+    # backstop to the software-managed stop (see order_manager.py). None in
+    # paper mode, and None in live mode if the backstop order could not be
+    # placed (the software-managed stop still applies either way).
+    protective_stop_order_id = Column(String, nullable=True)
 
     opened_at = Column(DateTime, default=utcnow)
     closed_at = Column(DateTime)

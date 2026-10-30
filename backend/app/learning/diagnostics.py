@@ -12,8 +12,10 @@ from collections import defaultdict
 
 
 def diagnose_trades(trades: list) -> dict:
-    """trades: objects with .market_regime, .exit_reason, .net_pnl, .strategy_score
-    (BacktestTrade or the live Trade model both satisfy this shape)."""
+    """trades: objects with .exit_reason, .net_pnl, .strategy_score, and a
+    market-regime field named EITHER .market_regime (BacktestTrade) or
+    .market_condition (the live Trade model) - both satisfy this shape, but
+    not under the same attribute name, so both are checked."""
     by_regime = defaultdict(lambda: {"wins": 0, "losses": 0, "net_pnl": 0.0})
     by_exit_reason = defaultdict(lambda: {"wins": 0, "losses": 0, "net_pnl": 0.0})
     by_score_band = defaultdict(lambda: {"wins": 0, "losses": 0, "net_pnl": 0.0})
@@ -23,9 +25,10 @@ def diagnose_trades(trades: list) -> dict:
         is_win = net_pnl > 0
         score = t.strategy_score if getattr(t, "strategy_score", None) is not None else None
         score_band = f"{(score // 2) * 2}-{(score // 2) * 2 + 1}" if score is not None else "UNKNOWN"
+        regime = getattr(t, "market_regime", None) or getattr(t, "market_condition", None) or "UNKNOWN"
 
         for bucket_map, key in (
-            (by_regime, t.market_regime or "UNKNOWN"),
+            (by_regime, regime),
             (by_exit_reason, t.exit_reason or "UNKNOWN"),
             (by_score_band, score_band),
         ):

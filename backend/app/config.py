@@ -50,6 +50,32 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
 
+    # --- Automatic self-learning (opt-in, OFF by default) -----------------
+    # When enabled, once a day (after the market closes) the app re-runs the
+    # existing backtest -> walk-forward -> compare-and-decide pipeline on its
+    # own, instead of you calling POST /api/learning/experiment by hand. The
+    # evidence thresholds in app/learning/promotion.py are NOT loosened by
+    # this - a candidate strategy still only gets promoted if it clears the
+    # same sample-size/expectancy/drawdown bar a manual run would require.
+    # A promoted version is still NEVER wired into live/paper trading
+    # automatically - see promotion.py's module docstring for why.
+    ENABLE_AUTO_LEARNING: bool = False
+    AUTO_LEARNING_RUN_TIME: str = "16:00"  # IST, after SQUARE_OFF_TIME/MARKET_CLOSE_TIME
+    AUTO_LEARNING_SYMBOLS: str = "RELIANCE,TCS,HDFCBANK,ICICIBANK,INFY"  # comma-separated, kept small on purpose (API cost)
+    AUTO_LEARNING_LOOKBACK_DAYS: int = 60
+    AUTO_LEARNING_TRAIN_DAYS: int = 3
+    AUTO_LEARNING_TEST_DAYS: int = 2
+    AUTO_LEARNING_EMBARGO_DAYS: int = 1
+
+    def auto_learning_symbol_list(self) -> list[str]:
+        return [s.strip() for s in self.AUTO_LEARNING_SYMBOLS.split(",") if s.strip()]
+
+    # --- Alerting (opt-in - a no-op unless both are set) -------------------
+    # Get a bot token from @BotFather on Telegram, message the bot once,
+    # then fetch TELEGRAM_CHAT_ID from https://api.telegram.org/bot<token>/getUpdates
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
+
     @property
     def database_path(self) -> Path:
         p = Path(self.DATABASE_PATH)
