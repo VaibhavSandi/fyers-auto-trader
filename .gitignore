@@ -1,5 +1,5 @@
 backend/venv/
-backend/.env
+
 
 backend/data/*.db
 backend/data/ml_models/
@@ -9,7 +9,6 @@ backend/__pycache__/
 *.pyc
 .pytest_cache/
 
-frontend/node_modules/
 frontend/dist/
 
 .DS_Store

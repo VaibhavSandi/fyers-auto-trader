@@ -200,6 +200,15 @@ def evaluate(symbol: str, candles: list[dict], market_regime: str, min_risk_rewa
         return TradeSetup(symbol, "NO_TRADE", 0, MAX_SCORE, False, [], {},
                            rejected_reason="Market regime unsafe - no trade today for this stock")
 
+    # A NEUTRAL regime forfeits the "trend matches market" (+2) and "market
+    # regime confirmation" (+1) points, so a candidate can only ever reach
+    # the 7-point minimum via the weakest possible combination of signals.
+    # Live trade history confirms this isn't theoretical: every trade taken
+    # in a NEUTRAL regime at the minimum score has lost money so far.
+    if market_regime == "NEUTRAL":
+        return TradeSetup(symbol, "NO_TRADE", 0, MAX_SCORE, False, [], {},
+                           rejected_reason="Market regime neutral - skipping, no directional edge to trade")
+
     if len(candles) < 25:
         return TradeSetup(symbol, "NO_TRADE", 0, MAX_SCORE, False, [], {},
                            rejected_reason="Not enough intraday data")

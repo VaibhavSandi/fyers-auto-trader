@@ -151,6 +151,12 @@ def evaluate(symbol: str, candles: list[dict], market_regime: str, min_risk_rewa
     if market_regime == "HIGH_VOLATILITY_UNSAFE":
         return TradeSetup(symbol, "NO_TRADE", 0, MAX_SCORE, False, [], {},
                            rejected_reason="Market regime unsafe - no trade today for this stock")
+    # See app/engine/strategy.py for the rationale - a NEUTRAL regime forfeits
+    # the regime-alignment points, so only the weakest setups ever pass; live
+    # trade history shows those NEUTRAL-regime minimum-score trades all lose.
+    if market_regime == "NEUTRAL":
+        return TradeSetup(symbol, "NO_TRADE", 0, MAX_SCORE, False, [], {},
+                           rejected_reason="Market regime neutral - skipping, no directional edge to trade")
     if len(candles) < 25:
         return TradeSetup(symbol, "NO_TRADE", 0, MAX_SCORE, False, [], {},
                            rejected_reason="Not enough intraday data")
